@@ -136,18 +136,18 @@ int main() {
             double other_car_s = sensor_fusion[i][5];
             other_car_s += ((double)prev_path_size * 0.02 * other_car_vel);
 
-            int gap_buf = 30;
+            int gap_buf = 25;
             if (other_car_lane == my_lane)
               car_ahead |= other_car_s > car_s && other_car_s - car_s < gap_buf;
             else if (other_car_lane - my_lane == -1)
               car_left |= car_s - other_car_s < gap_buf && other_car_s - car_s < gap_buf;
             else if (other_car_lane - my_lane == 1)
-              car_right |= car_s - gap_buf < other_car_s && other_car_s - gap_buf < car_s;
+              car_right |= car_s - other_car_s < gap_buf && other_car_s - car_s < gap_buf;
           }
 
             //start planning
             double new_vel = 0.0;
-            const double MAX_VEL = 49.50;
+            const double MAX_VEL = 49.80;
             const double MAX_ACC = 0.224;
 
             if (car_ahead) {
@@ -226,7 +226,7 @@ int main() {
             double shift_y = waypoints_y[i] - ref_y;
 
             waypoints_x[i] = shift_x * cos(0 - ref_yaw) - shift_y * sin(0 - ref_yaw);
-            waypoints_y[i] = shift_x * sin(0 - ref_yaw) - shift_y * cos(0 - ref_yaw);
+            waypoints_y[i] = shift_x * sin(0 - ref_yaw) + shift_y * cos(0 - ref_yaw);
           }
 
           //create the spline
@@ -239,13 +239,13 @@ int main() {
             next_y_vals.push_back(previous_path_y[i]);
           }
 
-          double target_x = waypoints_gap;
+          double target_x = (double)waypoints_gap;
           double target_y = spl(target_x);
           double target_dist = sqrt(pow(target_x, 2) + pow(target_y, 2));
           double add_x = 0.0;
 
           //50 waypoints
-          for (int i=0; i<50-prev_path_size; i++) {
+          for (int i=0; i<=50-prev_path_size; i++) {
             ref_vel += new_vel;
 
             //avoid driving over the speed limit!
@@ -255,7 +255,7 @@ int main() {
             //0.02 seconds to the next waypoint | convenrting the ref vel from MPH to m/s
             double N = target_dist / (0.02 * ref_vel / 2.24);
             double point_x = add_x + target_x / N;
-            double point_y = spl(target_x);
+            double point_y = spl(point_x);
 
             add_x = point_x;
             double new_ref_x = point_x;
@@ -263,10 +263,10 @@ int main() {
 
             //convert local coordinates to global coordinates
             point_x = new_ref_x * cos(ref_yaw) - new_ref_y * sin(ref_yaw);
-            point_y = new_ref_x * sin(ref_yaw) - new_ref_y * cos(ref_yaw);
+            point_y = new_ref_x * sin(ref_yaw) + new_ref_y * cos(ref_yaw);
 
-            point_x += new_ref_x;
-            point_y += new_ref_y;
+            point_x += ref_x;
+            point_y += ref_y;
 
             next_x_vals.push_back(point_x);
             next_y_vals.push_back(point_y);
