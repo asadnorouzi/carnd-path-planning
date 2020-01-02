@@ -8,6 +8,9 @@
 #include "helpers.h"
 #include "json.hpp"
 #include "spline.h"
+#include "prediction.h"
+#include "planner.h"
+#include "jmt.h"
 
 // for convenience
 using nlohmann::json;
@@ -63,7 +66,8 @@ int main() {
     // The 2 signifies a websocket event
     if (length && length > 2 && data[0] == '4' && data[1] == '2') {
 
-      auto s = hasData(data);
+      Helper hp;
+      auto s = hp.hasData(data);
 
       if (s != "") {
         auto j = json::parse(s);
@@ -108,169 +112,16 @@ int main() {
             car_s = end_path_s;
 
           // prediction of other cars behavior/location
-          bool car_ahead = false;
-          bool car_left = false;
-          bool car_right = false;
+          Prediction pred(my_lane);
+          pred.predict(sensor_fusion, car_s, prev_path_size);
 
-          for (unsigned int i=0; i<sensor_fusion.size(); i++) {
-            // predict other car's lane
-            float other_car_d = sensor_fusion[i][6];
-            int other_car_lane = -1;
+          //start planning
+          Planner behavior;
+          behavior.plan(pred, my_lane, ref_vel);
 
-            if (other_car_d >= 0 && other_car_d <= 4)
-              other_car_lane = 0;
-            else if (other_car_d > 4 && other_car_d <= 8)
-              other_car_lane = 1;
-            else if (other_car_d > 8 && other_car_d <= 12)
-              other_car_lane = 2;
-
-            if (other_car_lane < 0)
-              continue;
-
-            //predict other car's speed
-            double other_car_vel_x = sensor_fusion[i][3];
-            double other_car_vel_y = sensor_fusion[i][4];
-            double other_car_vel = sqrt(pow(other_car_vel_x, 2) + pow(other_car_vel_y, 2));
-
-            //predict other car's distance
-            double other_car_s = sensor_fusion[i][5];
-            other_car_s += ((double)prev_path_size * 0.02 * other_car_vel);
-
-            int gap_buf = 25;
-            if (other_car_lane == my_lane)
-              car_ahead |= other_car_s > car_s && other_car_s - car_s < gap_buf;
-            else if (other_car_lane - my_lane == -1)
-              car_left |= car_s - other_car_s < gap_buf && other_car_s - car_s < gap_buf;
-            else if (other_car_lane - my_lane == 1)
-              car_right |= car_s - other_car_s < gap_buf && other_car_s - car_s < gap_buf;
-          }
-
-            //start planning
-            double new_vel = 0.0;
-            const double MAX_VEL = 49.80;
-            const double MAX_ACC = 0.224;
-
-            if (car_ahead) {
-              if (!car_left && my_lane != 0)
-               //move to left lane
-                my_lane--;
-              else if (!car_right && my_lane != 2)
-                //move to right lane
-                my_lane++;
-              else
-                //do not change lane!
-                new_vel -= MAX_ACC;
-            }
-            else {
-              //no car ahead
-              if (ref_vel < MAX_VEL)
-                new_vel += MAX_ACC;
-            }
-
-            //create the trajectory waypoints
-            vector<double> waypoints_x;
-            vector<double> waypoints_y;
-            double ref_x = car_x;
-            double ref_y = car_y;
-            double ref_yaw = deg2rad(car_yaw);
-
-            if (prev_path_size < 2) {
-              //we use car location as reference
-              double prev_car_x = car_x - cos(car_yaw);
-              double prev_car_y = car_y - sin(car_yaw);
-
-              waypoints_x.push_back(prev_car_x);
-              waypoints_x.push_back(car_x);
-              waypoints_y.push_back(prev_car_y);
-              waypoints_y.push_back(car_y);
-            }
-            else {
-              //we use previous path as reference
-              ref_x = previous_path_x[prev_path_size-1];
-              ref_y = previous_path_y[prev_path_size-1];
-
-              double prev_ref_x = previous_path_x[prev_path_size-2];
-              double prev_ref_y = previous_path_y[prev_path_size-2];
-
-              ref_yaw = atan2(ref_y - prev_ref_y, ref_x - prev_ref_x);
-
-              waypoints_x.push_back(prev_ref_x);
-              waypoints_x.push_back(ref_x);
-              waypoints_y.push_back(prev_ref_y);
-              waypoints_y.push_back(ref_y);
-            }
-
-          int waypoints_gap = 30;
-
-          //calculate waypoints such that they're 30m apart.
-          vector<double> next_waypoint_0 = getXY(car_s + waypoints_gap,
-                                                 (2 + 4 * my_lane), map_waypoints_s,
-                                                 map_waypoints_x, map_waypoints_y);
-          vector<double> next_waypoint_1 = getXY(car_s + waypoints_gap*2,
-                                                 (2 + 4 * my_lane), map_waypoints_s,
-                                                 map_waypoints_x, map_waypoints_y);
-          vector<double> next_waypoint_2 = getXY(car_s + waypoints_gap*3,
-                                                 (2 + 4 * my_lane), map_waypoints_s,
-                                                 map_waypoints_x, map_waypoints_y);
-
-          waypoints_x.push_back(next_waypoint_0[0]);
-          waypoints_x.push_back(next_waypoint_1[0]);
-          waypoints_x.push_back(next_waypoint_2[0]);
-          waypoints_y.push_back(next_waypoint_0[1]);
-          waypoints_y.push_back(next_waypoint_1[1]);
-          waypoints_y.push_back(next_waypoint_2[1]);
-
-          for (unsigned int i=0; i<waypoints_x.size(); i++) {
-            //shifting the waypoints coordinates to the car's local coordinate
-            double shift_x = waypoints_x[i] - ref_x;
-            double shift_y = waypoints_y[i] - ref_y;
-
-            waypoints_x[i] = shift_x * cos(0 - ref_yaw) - shift_y * sin(0 - ref_yaw);
-            waypoints_y[i] = shift_x * sin(0 - ref_yaw) + shift_y * cos(0 - ref_yaw);
-          }
-
-          //create the spline
-          tk::spline spl;
-          spl.set_points(waypoints_x, waypoints_y);
-
-          for (int i=0; i<prev_path_size; i++) {
-            //previous waypoints
-            next_x_vals.push_back(previous_path_x[i]);
-            next_y_vals.push_back(previous_path_y[i]);
-          }
-
-          double target_x = (double)waypoints_gap;
-          double target_y = spl(target_x);
-          double target_dist = sqrt(pow(target_x, 2) + pow(target_y, 2));
-          double add_x = 0.0;
-
-          //50 waypoints
-          for (int i=0; i<=50-prev_path_size; i++) {
-            ref_vel += new_vel;
-
-            //avoid driving over the speed limit!
-            if (ref_vel > MAX_VEL)
-              ref_vel = MAX_VEL;
-
-            //0.02 seconds to the next waypoint | convenrting the ref vel from MPH to m/s
-            double N = target_dist / (0.02 * ref_vel / 2.24);
-            double point_x = add_x + target_x / N;
-            double point_y = spl(point_x);
-
-            add_x = point_x;
-            double new_ref_x = point_x;
-            double new_ref_y = point_y;
-
-            //convert local coordinates to global coordinates
-            point_x = new_ref_x * cos(ref_yaw) - new_ref_y * sin(ref_yaw);
-            point_y = new_ref_x * sin(ref_yaw) + new_ref_y * cos(ref_yaw);
-
-            point_x += ref_x;
-            point_y += ref_y;
-
-            next_x_vals.push_back(point_x);
-            next_y_vals.push_back(point_y);
-          }
+          //create the trajectory waypoints
+          JMT jmt;
+          jmt.create_trajectory(behavior, previous_path_x, previous_path_y, map_waypoints_s, map_waypoints_x, map_waypoints_y, prev_path_size, car_s, car_x, car_y, car_yaw, my_lane, next_x_vals, next_y_vals, ref_vel);
 
           msgJson["next_x"] = next_x_vals;
           msgJson["next_y"] = next_y_vals;
